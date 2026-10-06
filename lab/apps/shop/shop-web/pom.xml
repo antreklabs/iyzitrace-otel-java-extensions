@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.iyzitrace.otel</groupId>
+    <artifactId>shop</artifactId>
+    <version>${revision}</version>
+  </parent>
+
+  <artifactId>shop-web</artifactId>
+  <packaging>war</packaging>
+
+  <dependencies>
+    <dependency>
+      <groupId>jakarta.platform</groupId>
+      <artifactId>jakarta.jakartaee-api</artifactId>
+    </dependency>
+    <!-- Visible at runtime through the EAR; not packaged into the WAR. -->
+    <dependency>
+      <groupId>com.iyzitrace.otel</groupId>
+      <artifactId>shop-ejb</artifactId>
+      <version>${project.version}</version>
+      <type>ejb</type>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+</project>

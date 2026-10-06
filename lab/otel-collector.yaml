@@ -1,0 +1,83 @@
+# Traces, to Jaeger and to iyzitrace: one service.name per application, produced from the
+#   extension's appserver.deployment.* span attributes (groupbyattrs splits the resource,
+#   transform renames the service). Remove both processors from traces/iyzitrace to send it the
+#   agent's data unchanged (one service.name per server, like an agent exporting directly).
+# Metrics and logs, to iyzitrace: unchanged.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+  # Moves the deployment attributes from span attributes onto the resource, so spans with a
+  # different deployment / context root end up under different resources.
+  groupbyattrs/deployment:
+    keys:
+      - appserver.deployment.name
+      - appserver.deployment.context_root
+      - appserver.deployment.service.name
+      - appserver.deployment.service.namespace
+
+  # service.name, first match wins:
+  #   1. otel.service.name the deployment declares in microprofile-config.properties
+  #   2. context root without the leading slash (/orders -> orders)
+  #   3. deployment name (timers, deploy-time work, MDBs, root context "/")
+  # service.namespace: the declared namespace, else the server-wide service.name (wildfly-27-lab, tomcat-10-lab, ...).
+  # Statements run in order, so the later ones override the earlier ones.
+  transform/deployment-as-service:
+    error_mode: ignore
+    trace_statements:
+      - context: resource
+        statements:
+          - set(attributes["service.namespace"], attributes["service.name"]) where attributes["appserver.deployment.name"] != nil
+          - set(attributes["service.name"], attributes["appserver.deployment.name"]) where attributes["appserver.deployment.name"] != nil
+          - set(attributes["service.name"], attributes["appserver.deployment.context_root"]) where attributes["appserver.deployment.context_root"] != nil and attributes["appserver.deployment.context_root"] != "/"
+          - replace_pattern(attributes["service.name"], "^/", "") where attributes["appserver.deployment.context_root"] != nil and attributes["appserver.deployment.context_root"] != "/"
+          - set(attributes["service.name"], attributes["appserver.deployment.service.name"]) where attributes["appserver.deployment.service.name"] != nil
+          - set(attributes["service.namespace"], attributes["appserver.deployment.service.namespace"]) where attributes["appserver.deployment.service.namespace"] != nil
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  otlphttp/iyzitrace:
+    endpoint: ${env:IYZITRACE_OTLP_ENDPOINT}
+    compression: none
+    headers:
+      iyzitrace-api-key: ${env:IYZITRACE_API_KEY}
+
+  debug:
+    verbosity: basic
+
+  # Jaeger has no logs view; print a sample of log records with their attributes instead
+  # (docker compose logs otel-collector | grep -A12 'LogRecord #').
+  debug/logs:
+    verbosity: detailed
+    sampling_initial: 10
+    sampling_thereafter: 100
+
+service:
+  pipelines:
+    traces/jaeger:
+      receivers: [otlp]
+      processors: [groupbyattrs/deployment, transform/deployment-as-service, batch]
+      exporters: [otlp/jaeger]
+    traces/iyzitrace:
+      receivers: [otlp]
+      processors: [groupbyattrs/deployment, transform/deployment-as-service, batch]
+      exporters: [otlphttp/iyzitrace, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/iyzitrace, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/iyzitrace, debug/logs]

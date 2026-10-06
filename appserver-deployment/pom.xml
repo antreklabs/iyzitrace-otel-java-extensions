@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.iyzitrace.otel</groupId>
+    <artifactId>iyzitrace-otel-java-extensions</artifactId>
+    <version>${revision}</version>
+  </parent>
+
+  <artifactId>appserver-deployment-extension</artifactId>
+  <packaging>jar</packaging>
+  <name>OpenTelemetry Java agent extension: application server deployment attribution</name>
+
+  <!--
+    Everything is "provided": the agent supplies the SDK, the extension API and Byte Buddy at runtime,
+    and remaps io.opentelemetry.api references to its shaded copy when it loads the extension.
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>io.opentelemetry.javaagent</groupId>
+      <artifactId>opentelemetry-javaagent-extension-api</artifactId>
+      <version>${otel.agent.version}-alpha</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk</artifactId>
+      <version>${otel.sdk.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk-extension-autoconfigure-spi</artifactId>
+      <version>${otel.sdk.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>net.bytebuddy</groupId>
+      <artifactId>byte-buddy-dep</artifactId>
+      <version>${bytebuddy.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Both servlet namespaces: the advice is compiled against each, the helpers against neither. -->
+    <dependency>
+      <groupId>jakarta.servlet</groupId>
+      <artifactId>jakarta.servlet-api</artifactId>
+      <version>6.0.0</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>javax.servlet</groupId>
+      <artifactId>javax.servlet-api</artifactId>
+      <version>4.0.1</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk-testing</artifactId>
+      <version>${otel.sdk.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.4</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>appserver-deployment-extension</finalName>
+  </build>
+</project>

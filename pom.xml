@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.iyzitrace.otel</groupId>
+  <artifactId>iyzitrace-otel-java-extensions</artifactId>
+  <version>${revision}</version>
+  <packaging>pom</packaging>
+
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+    </license>
+  </licenses>
+
+  <modules>
+    <!-- Extensions -->
+    <module>appserver-deployment</module>
+
+    <!-- Lab applications (see lab/README.md) -->
+    <module>lab/apps/orders</module>
+    <module>lab/apps/inventory</module>
+    <module>lab/apps/shop</module>
+    <module>lab/apps/reports</module>
+    <module>lab/apps/tomcat/catalog</module>
+    <module>lab/apps/tomcat/pricing</module>
+    <module>lab/apps/tomcat9/legacy</module>
+  </modules>
+
+  <properties>
+    <!-- Release version. CI overrides it with -Drevision=<tag without the leading v>. -->
+    <revision>0.1.0</revision>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- WildFly 27 supports Java 11 and 17; target 11 so the extension also fits Java 11 servers. -->
+    <maven.compiler.release>11</maven.compiler.release>
+
+    <jakartaee.version>10.0.0</jakartaee.version>
+    <otel.agent.version>2.21.0</otel.agent.version>
+    <!-- SDK version bundled inside agent 2.21.0 (see version.properties in the agent jar). -->
+    <otel.sdk.version>1.55.0</otel.sdk.version>
+    <bytebuddy.version>1.17.7</bytebuddy.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>jakarta.platform</groupId>
+        <artifactId>jakarta.jakartaee-api</artifactId>
+        <version>${jakartaee.version}</version>
+        <scope>provided</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>3.13.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>3.4.2</version>
+          <configuration>
+            <archive>
+              <manifestEntries>
+                <Implementation-Title>${project.artifactId}</Implementation-Title>
+                <Implementation-Version>${project.version}</Implementation-Version>
+              </manifestEntries>
+            </archive>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-war-plugin</artifactId>
+          <version>3.4.0</version>
+          <configuration>
+            <failOnMissingWebXml>false</failOnMissingWebXml>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-ejb-plugin</artifactId>
+          <version>3.2.1</version>
+          <configuration>
+            <ejbVersion>4.0</ejbVersion>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-ear-plugin</artifactId>
+          <version>3.3.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>3.5.2</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>

@@ -1,0 +1,11 @@
+# Build output
+target/
+
+# Local secrets (copy lab/.env.example to lab/.env)
+.env
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
