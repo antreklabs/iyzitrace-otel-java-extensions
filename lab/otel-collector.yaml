@@ -14,7 +14,9 @@ receivers:
   # WildFly's management-model statistics in Prometheus format, on the management interface
   # (http://<host>:9990/metrics, no login by default). Covers every subsystem with
   # statistics-enabled=true: datasources, undertow, ejb3, transactions, jca, ee, io, batch.
-  # The job name becomes service.name, so it matches the agent's otel.service.name.
+  # The job name becomes service.name and the instance label service.instance.id. Both are set to
+  # the agent's values (otel.service.name, service.instance.id in otel.resource.attributes), so the
+  # scraped metrics and the agent's metrics and traces of this server share one identity.
   prometheus/wildfly:
     config:
       scrape_configs:
@@ -23,6 +25,9 @@ receivers:
           metrics_path: /metrics
           static_configs:
             - targets: ["wildfly:9990"]
+              labels:
+                # instance would default to the target (wildfly:9990); use the agent's service.instance.id.
+                instance: ${env:WILDFLY_INSTANCE_ID}
           metric_relabel_configs:
             # base_* and vendor_* are JVM metrics; the agent already sends them as jvm.*.
             - source_labels: [__name__]
@@ -31,6 +36,16 @@ receivers:
 
 processors:
   batch: {}
+
+  # The prometheus receiver derives server.address / server.port from the instance label, which
+  # relabel_configs set to the instance id (wildfly-1), giving server.address=wildfly-1 and an empty
+  # port. Remove them; the agent's metrics never carry them on the resource.
+  resource/scrape-target:
+    attributes:
+      - key: server.address
+        action: delete
+      - key: server.port
+        action: delete
 
   # Moves the deployment attributes from span attributes onto the resource, so spans with a
   # different deployment / context root end up under different resources.
@@ -93,7 +108,7 @@ service:
       exporters: [otlphttp/iyzitrace, debug]
     metrics:
       receivers: [otlp, prometheus/wildfly]
-      processors: [batch]
+      processors: [resource/scrape-target, batch]
       exporters: [otlphttp/iyzitrace, debug]
     logs:
       receivers: [otlp]

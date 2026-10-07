@@ -77,7 +77,7 @@ Both read WildFly's runtime statistics from its management model, so both need [
 | Not in the other | EJB, JCA, EE executors, IO, batch, min/max request times, transaction timeouts and heuristics, most pool metrics | `wildfly.session.active.limit` (also in 3 as `wildfly_undertow_max_active_sessions`); nothing else |
 | Names | Prometheus style: `wildfly_undertow_request_count_total`, labels `deployment`, `servlet`, `data_source`, ... | OTel style: `wildfly.request.count`, attributes `wildfly.deployment`, `wildfly.listener`, `db.client.connection.pool.name`, ... |
 | Units and types | Prometheus counters and gauges; times in seconds | OTel counters / up-down counters with units (`{request}`, `s`, `By`) |
-| Resource attributes | from the scrape: `service.name` = job name, `service.instance.id` = target (`wildfly-1:9990`) | the agent's resource, the same as on its JVM metrics and traces (`service.name`, `service.instance.id`, `host.*`, `process.*`) |
+| Resource attributes | from the scrape: `service.name` (job name) and `service.instance.id` (`instance` label), set to the agent's values in step 6; no host or process details | the agent's resource, the same as on its JVM metrics and traces (`service.name`, `service.instance.id`, `host.*`, `process.*`) |
 | Interval | `scrape_interval` (step 6) | `otel.metric.export.interval` (step 1) |
 | Setup | statistics + `metrics` subsystem + management binding + collector receiver | statistics + one JVM option |
 | Extending | automatic: every subsystem with statistics is included | write your own rule file (`-Dotel.jmx.config=<file>.yaml`) for any MBean |
@@ -113,6 +113,7 @@ Sources 1, 2 and (if you use it) 4 come from the agent. Add to `bin/standalone.c
 
 ```sh
 JAVA_OPTS="$JAVA_OPTS -Dotel.service.name=wildfly-prod"
+JAVA_OPTS="$JAVA_OPTS -Dotel.resource.attributes=service.instance.id=wildfly-1"
 JAVA_OPTS="$JAVA_OPTS -Dotel.exporter.otlp.endpoint=http://otel-collector:4318"
 JAVA_OPTS="$JAVA_OPTS -Dotel.exporter.otlp.protocol=http/protobuf"
 JAVA_OPTS="$JAVA_OPTS -Dotel.metrics.exporter=otlp"
@@ -121,7 +122,8 @@ JAVA_OPTS="$JAVA_OPTS -Dotel.metric.export.interval=15000"
 
 - `otel.metrics.exporter=otlp` is the agent's default; setting it makes the intent explicit.
 - `otel.metric.export.interval` is in milliseconds. The default is 60000; 15000 matches the scrape interval in step 6, so all sources have the same resolution.
-- `otel.service.name` is reused as the scrape job name in step 6, so all sources land under the same service.
+- `otel.service.name` and `service.instance.id` are reused in step 6, so the agent's data and the scraped metrics of one server share one identity ([below](#one-identity-for-all-sources)).
+- `service.instance.id` is a stable name for this server, e.g. its node name. Without it the agent generates a random id on every start, which the scrape can't match and which changes with each restart.
 
 ## Step 2: JVM metrics
 
@@ -292,26 +294,45 @@ receivers:
           metrics_path: /metrics
           static_configs:
             - targets: ["wildfly-1:9990"]
+              labels:
+                instance: wildfly-1           # becomes service.instance.id: use the agent's service.instance.id
           metric_relabel_configs:
             # base_* and vendor_* are JVM metrics; the agent already sends them as jvm.* (step 2).
             - source_labels: [__name__]
               regex: "(base|vendor)_.*"
               action: drop
 
+processors:
+  # The receiver derives server.address / server.port from the instance label; with
+  # instance=wildfly-1 they'd be wrong (no port). Remove them.
+  resource/scrape-target:
+    attributes:
+      - key: server.address
+        action: delete
+      - key: server.port
+        action: delete
+
 service:
   pipelines:
     metrics:
       receivers: [otlp, prometheus/wildfly]
-      processors: [batch]
+      processors: [resource/scrape-target, batch]
       exporters: [<your exporter>]
 ```
 
-What the receiver sets on every scraped metric:
+### One identity for all sources
 
-| Resource attribute | Value |
-|---|---|
-| `service.name` | the `job_name` |
-| `service.instance.id` | the target, e.g. `wildfly-1:9990` |
+The receiver puts these resource attributes on every scraped metric:
+
+| Resource attribute | Value | Without the settings above |
+|---|---|---|
+| `service.name` | the `job_name` | – (always the job name) |
+| `service.instance.id` | the `instance` label | the target, `wildfly-1:9990` |
+| `url.scheme` | `http` | same |
+
+The agent's metrics and traces carry `service.name` and `service.instance.id` from step 1, plus host, process and runtime details (`host.name`, `process.pid`, `process.runtime.*`, ...). The scraped metrics carry none of those details.
+
+Setting `job_name` to `otel.service.name` and `instance` to the agent's `service.instance.id` gives all of one server's data, scraped or pushed, the same `service.name` + `service.instance.id`. The backend can then put `wildfly_*` next to the same JVM's `jvm.*` metrics and traces, and reach the host and process details through the shared instance id. Without it, the scraped metrics only match by `service.name`, which isn't enough once several servers share it ([clusters](#clusters)).
 
 ### What arrives
 
@@ -328,6 +349,24 @@ What the receiver sets on every scraped metric:
 | request | 1 | active requests | no |
 
 Names stay in Prometheus style: `wildfly_undertow_request_count_total`, not `wildfly.request.count`. Labels identify the resource: `deployment`, `subdeployment`, `servlet`, `data_source`, `stateless_session_bean`, `http_listener`, ...
+
+### Metrics that read 0
+
+Even with statistics on, many `wildfly_*` metrics read 0. In the lab, with steady traffic, about 75 of the 133 names do. That's normal for three reasons:
+
+| Reason | Examples | What to do |
+|---|---|---|
+| **Healthy zero**: the metric counts a problem | pool waits, timeouts, blocking failures, destroyed connections; transaction rollbacks, timeouts, heuristics; hung threads, rejected tasks, queue sizes | nothing; alert when they rise |
+| **Feature not used** by the applications | JCA work (no resource adapter), XA phases other than start / commit, prepared statement cache (no `prepared-statements-cache-size` on the datasource), sessions, managed executors and batch jobs in applications that don't use them | nothing; they move once an application uses the feature |
+| **Needs listener configuration** | `wildfly_undertow_processing_time_total_seconds`, `wildfly_undertow_max_processing_time_seconds` | optional, see below |
+
+**Listener processing time.** These two metrics stay 0 until the HTTP listener records request start times, which is off by default and has no system property:
+
+```
+/subsystem=undertow/server=default-server/http-listener=default:write-attribute(name=record-request-start-time,value=true)
+```
+
+It adds a timestamp per request. Usually not needed: the per-deployment request times (`wildfly_undertow_total_request_time_total_seconds`, min / max) work without it, and `http.server.request.duration` (step 3) gives full latency histograms. The lab leaves it off.
 
 ## Step 7 (alternative to steps 5–6): the agent's WildFly JMX metrics
 
@@ -366,6 +405,7 @@ Switch the `debug` exporter back to `verbosity: basic` afterwards; `detailed` is
 # bin/standalone.conf
 JAVA_OPTS="$JAVA_OPTS -javaagent:/opt/opentelemetry-javaagent.jar"
 JAVA_OPTS="$JAVA_OPTS -Dotel.service.name=wildfly-prod"
+JAVA_OPTS="$JAVA_OPTS -Dotel.resource.attributes=service.instance.id=wildfly-1"
 JAVA_OPTS="$JAVA_OPTS -Dotel.exporter.otlp.endpoint=http://otel-collector:4318"
 JAVA_OPTS="$JAVA_OPTS -Dotel.exporter.otlp.protocol=http/protobuf"
 JAVA_OPTS="$JAVA_OPTS -Dotel.metric.export.interval=15000"
@@ -383,14 +423,24 @@ plus `-bmanagement <internal-ip>` (or a collector on the same host) and the scra
 
 Several standalone WildFly instances running the same applications:
 
-- Give every node the **same** `otel.service.name`, and tell the nodes apart by instance:
+- Give every node the **same** `otel.service.name` and its **own** stable `service.instance.id`, e.g. the node name:
 
   ```sh
-  JAVA_OPTS="$JAVA_OPTS -Dotel.resource.attributes=service.instance.id=${HOSTNAME},host.name=${HOSTNAME}"
+  # node 1                                                               # node 2
+  -Dotel.resource.attributes=service.instance.id=wildfly-1               -Dotel.resource.attributes=service.instance.id=wildfly-2
   ```
 
-  Otherwise the agent metrics of different nodes can fall into the same series.
-- List **one scrape target per node** in step 6. Each target becomes its own `service.instance.id` (`wildfly-1:9990`, `wildfly-2:9990`).
+- List **one scrape target per node** in step 6, each with the matching `instance` label:
+
+  ```yaml
+  static_configs:
+    - targets: ["wildfly-1.internal:9990"]
+      labels: {instance: wildfly-1}
+    - targets: ["wildfly-2.internal:9990"]
+      labels: {instance: wildfly-2}
+  ```
+
+  Each node's scraped metrics then share its `service.instance.id` with its agent data.
 - Enable statistics on **every** node (step 4); it's a per-node setting.
 - Counts are per node; sum over `service.instance.id` for cluster totals. Replicated sessions are counted on each node that holds them.
 - Neither source has cluster-specific metrics (Infinispan caches, JGroups membership).

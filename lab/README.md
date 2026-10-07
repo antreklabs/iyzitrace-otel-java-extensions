@@ -47,7 +47,7 @@ docker compose up -d --build
 | `tomcat9` | Tomcat 9 (javax) + agent + extension: `legacy.war` |
 | `otel-collector` | receives OTLP from all three agents and scrapes WildFly's `/metrics` endpoint; sends traces renamed per application to Jaeger and iyzitrace, metrics and logs unchanged to iyzitrace ([section 5](#5-collector-pipelines)) |
 | `jaeger` | local trace UI |
-| `loadgen` | [loadgen/traffic.sh](loadgen/traffic.sh): steady traffic to all applications. Every 7th round it also triggers errors: 500/502 on WildFly and Tomcat, and 404s for `/no-such-app/` on both. These errors and their stack traces in the server logs are intentional |
+| `loadgen` | [loadgen/traffic.sh](loadgen/traffic.sh): steady traffic to all applications; every 5th round also a restock (session, executor, batch job). Every 7th round it also triggers errors: 500/502 on WildFly and Tomcat, and 404s for `/no-such-app/` on both. These errors and their stack traces in the server logs are intentional |
 
 All images are built by one [Dockerfile](Dockerfile) with targets `wildfly`, `tomcat10` and `tomcat9`. They share a Maven build stage (all applications), an agent download stage, and an extension download stage. The extension is the **released jar** from GitHub Releases, checked against the release's `SHA256SUMS`; `EXTENSION_VERSION` (build arg, default `0.1.0`) picks the release. The build context is the repository root, because the applications are modules of the root [pom.xml](../pom.xml).
 
@@ -60,7 +60,8 @@ All images are built by one [Dockerfile](Dockerfile) with targets `wildfly`, `to
 | `IYZITRACE_OTLP_ENDPOINT` | `http://host.docker.internal:80/ingest/otlp` | iyzitrace ingest |
 | `AGENT_OTLP_ENDPOINT` / `AGENT_OTLP_HEADERS` | collector / empty | point the agents straight at iyzitrace to skip the collector |
 | `DEPLOYMENT_EXTENSION_ENABLED` | `true` | A/B switch for the extension, on all three servers |
-| `OTEL_SERVICE_NAME` | `wildfly-27-lab` | WildFly's server-wide `service.name` (Tomcats: `tomcat-10-lab`, `tomcat-9-lab`) |
+| `OTEL_SERVICE_NAME` | `wildfly-27-lab` | WildFly's server-wide `service.name` (Tomcats: `tomcat-10-lab`, `tomcat-9-lab`); also the scrape job name |
+| `WILDFLY_INSTANCE_ID` | `wildfly-1` | WildFly's `service.instance.id`, on the agent's data and on the scraped `/metrics` |
 | `WILDFLY_HTTP_PORT`, `TOMCAT10_HTTP_PORT`, `TOMCAT9_HTTP_PORT` | `8090`, `8091`, `8092` | host ports (8080 is often taken) |
 | `WILDFLY_MANAGEMENT_PORT`, `JAEGER_UI_PORT` | `9990`, `16686` | host ports |
 
@@ -71,7 +72,7 @@ A change in `.env` takes effect with `docker compose up -d`, which recreates the
 | Server | Application | Type | Declares (`microprofile-config.properties`) | What it exercises |
 |---|---|---|---|---|
 | WildFly | `orders.war` (`/orders`) | Jakarta REST, CDI, startup EJB | `order-service` / `commerce` | HTTP server and client, JDBC (H2 `ExampleDS`), deploy-time SQL, logs |
-| WildFly | `inventory.war` (`/inventory`) | Jakarta REST + plain servlet | nothing | fallback naming, random latency, `sku=broken` → 500 |
+| WildFly | `inventory.war` (`/inventory`) | Jakarta REST + plain servlet, batch job | nothing | fallback naming, random latency, `sku=broken` → 500; `POST /api/restock/{sku}` uses an HTTP session, the default managed executor and a batch job, so those WildFly metrics move |
 | WildFly | `shop.ear` (`/shop`) | EAR = `shop-web.war` + `shop-ejb.jar` | `shop-web.war`: `shop-frontend` (no namespace) | EAR modules, local EJB calls, one trace across three deployments |
 | WildFly | `reports.jar` | standalone EJB jar | `reporting-job` / `back-office` | `@Schedule` timer every 15 s with JDBC |
 | Tomcat 10.1 | `catalog.war` (`/catalog`) | plain servlets (jakarta) | `catalog-service` / `commerce` | HTTP client → pricing, a **filter-only** endpoint (`/status`), a **background scheduler** started by a `ServletContextListener` |
@@ -85,6 +86,7 @@ The declarations are in `apps/**/src/main/resources/META-INF/microprofile-config
 Every server setting is a JVM option in `JAVA_OPTS` in [docker-compose.yml](docker-compose.yml). WildFly's options are grouped by purpose, in this order. **Use** says what a server of your own needs:
 
 - **required**: without it, nothing (or nothing useful) is exported;
+- **recommended**: not needed to export, but the data is much harder to use without it;
 - **default**: the agent's default value, set explicitly so the lab doesn't depend on it; can be left out;
 - **optional**: adds data; the extension doesn't need it;
 - **lab**: specific to this lab or its environment.
@@ -119,6 +121,7 @@ Every server setting is a JVM option in `JAVA_OPTS` in [docker-compose.yml](dock
 | Option | Use | Purpose |
 |---|---|---|
 | `-Dotel.service.name=${OTEL_SERVICE_NAME:-wildfly-27-lab}` | **required** | the server-wide `service.name` on every span, metric and log record. Without it: `unknown_service:java` |
+| `-Dotel.resource.attributes=service.instance.id=${WILDFLY_INSTANCE_ID:-wildfly-1}` | recommended | a stable `service.instance.id` for this server, instead of a random id per start. The collector gives the scraped `/metrics` the same id, so scraped and agent data of one server match ([one identity for all sources](../docs/wildfly-metrics.md#one-identity-for-all-sources)) |
 | `-Dotel.exporter.otlp.endpoint=${AGENT_OTLP_ENDPOINT:-http://otel-collector:4318}` | **required** | where the agent sends data: the collector here. Default `http://localhost:4318` |
 | `-Dotel.exporter.otlp.protocol=http/protobuf` | default | OTLP over HTTP; matches port 4318. `grpc` would need port 4317 |
 | `-Dotel.exporter.otlp.headers=${AGENT_OTLP_HEADERS:-}` | optional | extra request headers, e.g. an API key when the agent sends straight to a backend. Empty for the collector |
@@ -168,7 +171,7 @@ To send iyzitrace the traces exactly as the agents emit them (one service per se
 
 ### WildFly metrics
 
-The `metrics` pipeline gets three sources from WildFly: the agent's JVM (1) and HTTP (2) metrics, and WildFly's own `/metrics` endpoint, which the collector scrapes (`prometheus/wildfly`, source 3). The agent's WildFly JMX metrics (`-Dotel.jmx.target.system=wildfly`, source 4) are off: they duplicate source 3. `-Dwildfly.statistics-enabled=true` in `JAVA_OPTS` turns on WildFly's statistics in every subsystem (undertow, transactions, datasources, EJB, ...), so the `wildfly_*` metrics carry real values.
+The `metrics` pipeline gets three sources from WildFly: the agent's JVM (1) and HTTP (2) metrics, and WildFly's own `/metrics` endpoint, which the collector scrapes (`prometheus/wildfly`, source 3). The agent's WildFly JMX metrics (`-Dotel.jmx.target.system=wildfly`, source 4) are off: they duplicate source 3. `-Dwildfly.statistics-enabled=true` in `JAVA_OPTS` turns on WildFly's statistics in every subsystem (undertow, transactions, datasources, EJB, ...), so the `wildfly_*` metrics carry real values. The restock endpoint in `inventory.war` also exercises sessions, the managed executor and batch, which no other application uses. The remaining zeros are healthy zeros or unused features ([metrics that read 0](../docs/wildfly-metrics.md#metrics-that-read-0)).
 
 Every source, how to set it up on your own server step by step, and what you lose without WildFly statistics: **[../docs/wildfly-metrics.md](../docs/wildfly-metrics.md)**.
 

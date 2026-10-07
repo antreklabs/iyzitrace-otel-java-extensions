@@ -28,6 +28,11 @@ while true; do
     esac
   done
   hit GET "$WILDFLY/inventory/health"
+  # Session + managed executor + batch job, so those wildfly_* metrics move. Not every round: each call
+  # adds a batch execution to WildFly's in-memory job repository.
+  if [ $((round % 5)) -eq 0 ]; then
+    hit POST "$WILDFLY/inventory/api/restock/$(echo $SKUS | cut -d' ' -f$(( round % 7 + 1 )))"
+  fi
 
   # Tomcat 10.1 (jakarta) and Tomcat 9 (javax)
   hit GET "$TOMCAT10/catalog/items/$(echo $SKUS | cut -d' ' -f$(( round % 7 + 1 )))"  # catalog -> pricing

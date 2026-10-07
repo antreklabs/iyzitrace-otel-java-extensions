@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<job id="restock" xmlns="https://jakarta.ee/xml/ns/jakartaee" version="2.0">
+  <step id="restock">
+    <batchlet ref="restockBatchlet">
+      <properties>
+        <property name="sku" value="#{jobParameters['sku']}"/>
+        <property name="units" value="#{jobParameters['units']}"/>
+      </properties>
+    </batchlet>
+  </step>
+</job>

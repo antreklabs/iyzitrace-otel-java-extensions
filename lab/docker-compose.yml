@@ -15,7 +15,7 @@ services:
       #   2. Proxy             hosts the JVM reaches without the HTTP proxy
       #   3. WildFly metrics   statistics on in every subsystem, so wildfly_* metrics have real values
       #   4. Agent             load the OpenTelemetry Java agent                          (required)
-      #   5. Export            service name and OTLP target for traces, metrics and logs  (required)
+      #   5. Export            service name, instance id, OTLP target for traces, metrics, logs (required)
       #   6. Extension         load the extension (required); enabled = the lab's A/B switch
       #   7. Agent metrics     export interval, extra JVM metrics
       #   8. More spans        JAX-RS controller spans; spans for EJB and timer methods
@@ -28,6 +28,7 @@ services:
         -Dwildfly.statistics-enabled=true
         -javaagent:/opt/opentelemetry-javaagent.jar
         -Dotel.service.name=${OTEL_SERVICE_NAME:-wildfly-27-lab}
+        -Dotel.resource.attributes=service.instance.id=${WILDFLY_INSTANCE_ID:-wildfly-1}
         -Dotel.exporter.otlp.endpoint=${AGENT_OTLP_ENDPOINT:-http://otel-collector:4318}
         -Dotel.exporter.otlp.protocol=http/protobuf
         -Dotel.exporter.otlp.headers=${AGENT_OTLP_HEADERS:-}
@@ -110,6 +111,7 @@ services:
       IYZITRACE_OTLP_ENDPOINT: ${IYZITRACE_OTLP_ENDPOINT:-http://host.docker.internal:80/ingest/otlp}
       IYZITRACE_API_KEY: ${IYZITRACE_API_KEY:-}
       WILDFLY_SERVICE_NAME: ${OTEL_SERVICE_NAME:-wildfly-27-lab}
+      WILDFLY_INSTANCE_ID: ${WILDFLY_INSTANCE_ID:-wildfly-1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
