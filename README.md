@@ -10,6 +10,10 @@ Extensions for the [OpenTelemetry Java agent](https://github.com/open-telemetry/
 
 Requires OpenTelemetry Java agent 2.0.0 or later, and Java 11 or later.
 
+## Guides
+
+- [WildFly metrics](docs/wildfly-metrics.md): every metric source for WildFly (JVM, HTTP, WildFly statistics, JMX), set up step by step with the agent and the collector.
+
 ## Lab
 
 [lab/](lab/README.md) runs WildFly 27, Tomcat 10.1 and Tomcat 9 with seven sample applications, an OpenTelemetry Collector and Jaeger in Docker Compose. It's used to verify the extensions on real servers.
@@ -71,6 +75,7 @@ docker run --rm -v "$PWD":/src -w /src maven:3.9.9-eclipse-temurin-17 mvn -B -nt
 
 ```
 appserver-deployment/   OpenTelemetry Java agent extension (Maven module)
+docs/                   guides that aren't specific to one extension
 lab/                    WildFly + Tomcat lab for verifying the extensions
 .github/workflows/      CI (build and test) and release (tag-triggered)
 pom.xml                 Maven parent: modules and dependency versions

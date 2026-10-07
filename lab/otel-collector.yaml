@@ -2,7 +2,7 @@
 #   extension's appserver.deployment.* span attributes (groupbyattrs splits the resource,
 #   transform renames the service). Remove both processors from traces/iyzitrace to send it the
 #   agent's data unchanged (one service.name per server, like an agent exporting directly).
-# Metrics and logs, to iyzitrace: unchanged.
+# Metrics and logs, to iyzitrace: unchanged, plus WildFly's own /metrics endpoint (prometheus/wildfly).
 receivers:
   otlp:
     protocols:
@@ -10,6 +10,24 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+
+  # WildFly's management-model statistics in Prometheus format, on the management interface
+  # (http://<host>:9990/metrics, no login by default). Covers every subsystem with
+  # statistics-enabled=true: datasources, undertow, ejb3, transactions, jca, ee, io, batch.
+  # The job name becomes service.name, so it matches the agent's otel.service.name.
+  prometheus/wildfly:
+    config:
+      scrape_configs:
+        - job_name: ${env:WILDFLY_SERVICE_NAME}
+          scrape_interval: 15s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["wildfly:9990"]
+          metric_relabel_configs:
+            # base_* and vendor_* are JVM metrics; the agent already sends them as jvm.*.
+            - source_labels: [__name__]
+              regex: "(base|vendor)_.*"
+              action: drop
 
 processors:
   batch: {}
@@ -71,10 +89,10 @@ service:
       exporters: [otlp/jaeger]
     traces/iyzitrace:
       receivers: [otlp]
-      processors: [groupbyattrs/deployment, transform/deployment-as-service, batch]
+      processors: [batch]
       exporters: [otlphttp/iyzitrace, debug]
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, prometheus/wildfly]
       processors: [batch]
       exporters: [otlphttp/iyzitrace, debug]
     logs:

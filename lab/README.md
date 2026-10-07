@@ -12,7 +12,7 @@ Three servers, seven applications, one OpenTelemetry Java agent per server (**2.
 1. [Quick start](#1-quick-start)
 2. [What runs](#2-what-runs)
 3. [The applications](#3-the-applications)
-4. [Lab-only settings](#4-lab-only-settings)
+4. [Server settings (`JAVA_OPTS`)](#4-server-settings-java_opts)
 5. [Collector pipelines](#5-collector-pipelines)
 6. [Cases, with real output](#6-cases-with-real-output)
 7. [Verifying](#7-verifying)
@@ -45,11 +45,11 @@ docker compose up -d --build
 | `wildfly` | WildFly 27.0.1 + agent + extension: `orders.war`, `inventory.war`, `shop.ear`, `reports.jar` |
 | `tomcat10` | Tomcat 10.1 (jakarta) + agent + extension: `catalog.war`, `pricing.war` |
 | `tomcat9` | Tomcat 9 (javax) + agent + extension: `legacy.war` |
-| `otel-collector` | receives OTLP from all three agents; sends traces renamed per application to Jaeger and iyzitrace, metrics and logs unchanged to iyzitrace ([section 5](#5-collector-pipelines)) |
+| `otel-collector` | receives OTLP from all three agents and scrapes WildFly's `/metrics` endpoint; sends traces renamed per application to Jaeger and iyzitrace, metrics and logs unchanged to iyzitrace ([section 5](#5-collector-pipelines)) |
 | `jaeger` | local trace UI |
 | `loadgen` | [loadgen/traffic.sh](loadgen/traffic.sh): steady traffic to all applications. Every 7th round it also triggers errors: 500/502 on WildFly and Tomcat, and 404s for `/no-such-app/` on both. These errors and their stack traces in the server logs are intentional |
 
-All images are built by one [Dockerfile](Dockerfile) with targets `wildfly`, `tomcat10` and `tomcat9`. They share a Maven build stage (extension + all applications) and an agent download stage. The build context is the repository root, because the extension in [`../appserver-deployment`](../appserver-deployment) is built together with the applications.
+All images are built by one [Dockerfile](Dockerfile) with targets `wildfly`, `tomcat10` and `tomcat9`. They share a Maven build stage (all applications), an agent download stage, and an extension download stage. The extension is the **released jar** from GitHub Releases, checked against the release's `SHA256SUMS`; `EXTENSION_VERSION` (build arg, default `0.1.0`) picks the release. The build context is the repository root, because the applications are modules of the root [pom.xml](../pom.xml).
 
 `.env` settings (copy from [.env.example](.env.example)):
 
@@ -80,25 +80,76 @@ A change in `.env` takes effect with `docker compose up -d`, which recreates the
 
 The declarations are in `apps/**/src/main/resources/META-INF/microprofile-config.properties`.
 
-## 4. Lab-only settings
+## 4. Server settings (`JAVA_OPTS`)
 
-Only these two lines in each server's `JAVA_OPTS` ([docker-compose.yml](docker-compose.yml)) belong to the extension:
+Every server setting is a JVM option in `JAVA_OPTS` in [docker-compose.yml](docker-compose.yml). WildFly's options are grouped by purpose, in this order. **Use** says what a server of your own needs:
 
-```
--Dotel.javaagent.extensions=/opt/otel/extensions/appserver-deployment-extension.jar
--Dotel.instrumentation.appserver-deployment.enabled=${DEPLOYMENT_EXTENSION_ENABLED:-true}
-```
+- **required**: without it, nothing (or nothing useful) is exported;
+- **default**: the agent's default value, set explicitly so the lab doesn't depend on it; can be left out;
+- **optional**: adds data; the extension doesn't need it;
+- **lab**: specific to this lab or its environment.
 
-The rest is agent configuration for the lab. The extension doesn't need it:
+### 1. JVM defaults
 
-| Setting | Server | Why the lab sets it |
+| Option | Use | Purpose |
 |---|---|---|
-| `otel.instrumentation.methods.include=...CheckoutService[checkout];...PricingService[priceInCents];...ReportJob[run]` | WildFly | Agent 2.21.0 has no EJB instrumentation, so EJB and timer methods produce no spans. This setting creates them, with only `code.*` attributes: the original problem |
-| `otel.instrumentation.common.experimental.controller-telemetry.enabled=true` | WildFly | adds the JAX-RS method spans (`OrderResource.create`, ...), which are off by default in agent 2.x |
-| `otel.traces/metrics/logs.exporter=otlp`, `otel.metric.export.interval=15000` | all | all three signals to the collector |
-| `-Xms... -Djava.net.preferIPv4Stack=true ...` (first line) | WildFly | setting `JAVA_OPTS` replaces WildFly's defaults from `standalone.conf`, so they're restored here |
+| `-Xms128m -Xmx768m -XX:MetaspaceSize=96M -XX:MaxMetaspaceSize=384m` | lab | heap and metaspace sizes. Setting `JAVA_OPTS` replaces the defaults from WildFly's `standalone.conf`, so they're restored here, with more memory for the agent |
+| `-Djava.net.preferIPv4Stack=true -Djava.awt.headless=true -Djboss.modules.system.pkgs=org.jboss.byteman` | lab | the rest of `standalone.conf`'s defaults. On your own server, append to `JAVA_OPTS` in `standalone.conf` instead (`JAVA_OPTS="$JAVA_OPTS ..."`) and the defaults stay |
 
-`standalone.sh` evaluates `JAVA_OPTS` as shell code, hence the quotes around `methods.include`, which contains `;`, `[` and `]`.
+### 2. Proxy
+
+| Option | Use | Purpose |
+|---|---|---|
+| `-Dhttp.nonProxyHosts="localhost\|127.*\|172.30.169.137"` | lab | hosts the JVM reaches directly when an HTTP proxy is configured. Only matters in an environment with a proxy; harmless otherwise |
+
+### 3. WildFly metrics
+
+| Option | Use | Purpose |
+|---|---|---|
+| `-Dwildfly.statistics-enabled=true` | optional | WildFly's runtime statistics in every subsystem (undertow, datasources, transactions, EJB, ...). Without it, most `wildfly_*` metrics read 0 or freeze ([WildFly metrics, step 4](../docs/wildfly-metrics.md#step-4-turn-on-wildfly-statistics)). Not an agent option: WildFly reads it |
+
+### 4. Agent
+
+| Option | Use | Purpose |
+|---|---|---|
+| `-javaagent:/opt/opentelemetry-javaagent.jar` | **required** | loads the OpenTelemetry Java agent. Everything below except groups 1–3 is read by the agent |
+
+### 5. Export
+
+| Option | Use | Purpose |
+|---|---|---|
+| `-Dotel.service.name=${OTEL_SERVICE_NAME:-wildfly-27-lab}` | **required** | the server-wide `service.name` on every span, metric and log record. Without it: `unknown_service:java` |
+| `-Dotel.exporter.otlp.endpoint=${AGENT_OTLP_ENDPOINT:-http://otel-collector:4318}` | **required** | where the agent sends data: the collector here. Default `http://localhost:4318` |
+| `-Dotel.exporter.otlp.protocol=http/protobuf` | default | OTLP over HTTP; matches port 4318. `grpc` would need port 4317 |
+| `-Dotel.exporter.otlp.headers=${AGENT_OTLP_HEADERS:-}` | optional | extra request headers, e.g. an API key when the agent sends straight to a backend. Empty for the collector |
+| `-Dotel.traces.exporter=otlp`, `-Dotel.metrics.exporter=otlp`, `-Dotel.logs.exporter=otlp` | default | send all three signals with OTLP. `none` switches one off |
+
+### 6. Extension
+
+| Option | Use | Purpose |
+|---|---|---|
+| `-Dotel.javaagent.extensions=/opt/otel/extensions/appserver-deployment-extension.jar` | **required** | loads the extension. The only option the extension needs ([extension README, section 2](../appserver-deployment/README.md#2-install)) |
+| `-Dotel.instrumentation.appserver-deployment.enabled=${DEPLOYMENT_EXTENSION_ENABLED:-true}` | lab | the lab's A/B switch (`DEPLOYMENT_EXTENSION_ENABLED` in `.env`). Default `true`; leave it out on your own server |
+
+### 7. Agent metrics
+
+| Option | Use | Purpose |
+|---|---|---|
+| `-Dotel.metric.export.interval=15000` | optional | push metrics every 15 s instead of the default 60 s; same as the collector's scrape interval for WildFly's `/metrics` |
+| `-Dotel.instrumentation.runtime-telemetry.emit-experimental-telemetry=true` | optional | extra JVM metrics on top of the default `jvm.*` set: buffer pools, file descriptors, system CPU ([WildFly metrics, step 2](../docs/wildfly-metrics.md#step-2-jvm-metrics)) |
+
+### 8. More spans
+
+| Option | Use | Purpose |
+|---|---|---|
+| `-Dotel.instrumentation.common.experimental.controller-telemetry.enabled=true` | optional | one extra span per request for the JAX-RS method that handled it (`OrderResource.create`, ...). **Off by default** in agent 2.x; without it only the HTTP server span names the request (`POST /orders/api/orders`). The cases in [section 6](#6-cases-with-real-output) show these spans |
+| `"-Dotel.instrumentation.methods.include=...CheckoutService[checkout];...PricingService[priceInCents];...ReportJob[run]"` | lab | a span for each listed method. Agent 2.21.0 has no EJB instrumentation, so EJB and timer methods produce no spans without it. The lab uses it to show the original problem (spans with only `code.*` attributes) and the timer case. On your own server, list the business methods you want to see |
+
+`standalone.sh` evaluates `JAVA_OPTS` as shell code, hence the quotes around `methods.include` (contains `;`, `[`, `]`) and `nonProxyHosts` (contains `|`).
+
+**Minimum for your own WildFly:** group 4, `otel.service.name` and `otel.exporter.otlp.endpoint` from group 5, and group 6's first option. Everything else adds data or is specific to the lab.
+
+The Tomcats (currently commented out in `docker-compose.yml`) use group 4, group 5 without the `*.exporter` options, group 6 and the export interval. Tomcat's `catalina.sh` adds `JAVA_OPTS` to its own defaults rather than replacing them, so they don't need group 1.
 
 ## 5. Collector pipelines
 
@@ -108,11 +159,18 @@ The rest is agent configuration for the lab. The extension doesn't need it:
 |---|---|---|
 | `traces/jaeger` | Jaeger | **renamed**: `groupbyattrs` + `transform` give each application its own `service.name` and `service.namespace` (rules: [extension README, section 7](../appserver-deployment/README.md#7-optional-one-servicename-per-application-collector)) |
 | `traces/iyzitrace` | iyzitrace (+ `debug` output) | **renamed**, same processors as Jaeger |
-| `metrics`, `logs` | iyzitrace (+ `debug` output) | **unchanged**: one `service.name` per server; logs carry the `appserver.deployment.*` attributes |
+| `metrics` | iyzitrace (+ `debug` output) | **unchanged**: OTLP from the agents plus WildFly's `/metrics` scraped by `prometheus/wildfly`; one `service.name` per server |
+| `logs` | iyzitrace (+ `debug` output) | **unchanged**: one `service.name` per server; log records carry the `appserver.deployment.*` attributes |
 
 So both **Jaeger** and **iyzitrace** list the traces under `order-service`, `inventory`, `shop-frontend`, `reporting-job`, `catalog-service`, `pricing` and `legacy`. Metrics and logs in iyzitrace stay under `wildfly-27-lab`, `tomcat-10-lab` and `tomcat-9-lab`. For logs, filter or group by `appserver.deployment.*`.
 
 To send iyzitrace the traces exactly as the agents emit them (one service per server, the same as an agent exporting directly), remove `groupbyattrs/deployment, transform/deployment-as-service` from `traces/iyzitrace`.
+
+### WildFly metrics
+
+The `metrics` pipeline gets three sources from WildFly: the agent's JVM (1) and HTTP (2) metrics, and WildFly's own `/metrics` endpoint, which the collector scrapes (`prometheus/wildfly`, source 3). The agent's WildFly JMX metrics (`-Dotel.jmx.target.system=wildfly`, source 4) are off: they duplicate source 3. `-Dwildfly.statistics-enabled=true` in `JAVA_OPTS` turns on WildFly's statistics in every subsystem (undertow, transactions, datasources, EJB, ...), so the `wildfly_*` metrics carry real values.
+
+Every source, how to set it up on your own server step by step, and what you lose without WildFly statistics: **[../docs/wildfly-metrics.md](../docs/wildfly-metrics.md)**.
 
 ## 6. Cases, with real output
 

@@ -2,22 +2,31 @@ services:
   # WildFly 27: orders.war, inventory.war, shop.ear, reports.jar (vendor resolver: JBoss Modules).
   wildfly:
     build:
-      context: ..                # repository root: the extension is built with the apps
+      context: ..                # repository root: the apps are modules of the root pom.xml
       dockerfile: lab/Dockerfile
       target: wildfly
       args:
         WILDFLY_VERSION: ${WILDFLY_VERSION:-27.0.1.Final}
         OTEL_JAVA_AGENT_VERSION: ${OTEL_JAVA_AGENT_VERSION:-2.21.0}
     environment:
-      # Setting JAVA_OPTS replaces the defaults in standalone.conf, so the first line restores them.
+      # JAVA_OPTS is one folded string, so comments can't go between its lines. The lines are grouped
+      # in this order (details: README.md, section 4):
+      #   1. JVM defaults      setting JAVA_OPTS replaces standalone.conf's defaults; restored here
+      #   2. Proxy             hosts the JVM reaches without the HTTP proxy
+      #   3. WildFly metrics   statistics on in every subsystem, so wildfly_* metrics have real values
+      #   4. Agent             load the OpenTelemetry Java agent                          (required)
+      #   5. Export            service name and OTLP target for traces, metrics and logs  (required)
+      #   6. Extension         load the extension (required); enabled = the lab's A/B switch
+      #   7. Agent metrics     export interval, extra JVM metrics
+      #   8. More spans        JAX-RS controller spans; spans for EJB and timer methods
       # All OpenTelemetry settings are JVM system properties; no OTEL_* environment variables.
       # standalone.sh evals JAVA_OPTS: quote values containing ; [ ] or |.
       JAVA_OPTS: >-
         -Xms128m -Xmx768m -XX:MetaspaceSize=96M -XX:MaxMetaspaceSize=384m
         -Djava.net.preferIPv4Stack=true -Djava.awt.headless=true -Djboss.modules.system.pkgs=org.jboss.byteman
+        -Dhttp.nonProxyHosts="localhost|127.*|172.30.169.137"
+        -Dwildfly.statistics-enabled=true
         -javaagent:/opt/opentelemetry-javaagent.jar
-        -Dotel.javaagent.extensions=/opt/otel/extensions/appserver-deployment-extension.jar
-        -Dotel.instrumentation.appserver-deployment.enabled=${DEPLOYMENT_EXTENSION_ENABLED:-true}
         -Dotel.service.name=${OTEL_SERVICE_NAME:-wildfly-27-lab}
         -Dotel.exporter.otlp.endpoint=${AGENT_OTLP_ENDPOINT:-http://otel-collector:4318}
         -Dotel.exporter.otlp.protocol=http/protobuf
@@ -26,9 +35,11 @@ services:
         -Dotel.metrics.exporter=otlp
         -Dotel.metric.export.interval=15000
         -Dotel.logs.exporter=otlp
+        -Dotel.javaagent.extensions=/opt/otel/extensions/appserver-deployment-extension.jar
+        -Dotel.instrumentation.appserver-deployment.enabled=${DEPLOYMENT_EXTENSION_ENABLED:-true}
+        -Dotel.instrumentation.runtime-telemetry.emit-experimental-telemetry=true
         -Dotel.instrumentation.common.experimental.controller-telemetry.enabled=true
         "-Dotel.instrumentation.methods.include=com.iyzitrace.lab.shop.ejb.CheckoutService[checkout];com.iyzitrace.lab.shop.ejb.PricingService[priceInCents];com.iyzitrace.lab.reports.ReportJob[run]"
-        -Dhttp.nonProxyHosts="localhost|127.*|172.30.169.137"
     ports:
       - "${WILDFLY_HTTP_PORT:-8090}:8080"
       - "${WILDFLY_MANAGEMENT_PORT:-9990}:9990"
@@ -42,53 +53,53 @@ services:
       retries: 60
       start_period: 20s
 
-  # Tomcat 10.1 (jakarta.servlet): catalog.war, pricing.war (no vendor resolver: generic core only).
-  tomcat10:
-    build:
-      context: ..                # repository root: the extension is built with the apps
-      dockerfile: lab/Dockerfile
-      target: tomcat10
-      args:
-        OTEL_JAVA_AGENT_VERSION: ${OTEL_JAVA_AGENT_VERSION:-2.21.0}
-    environment:
-      JAVA_OPTS: >-
-        -javaagent:/opt/opentelemetry-javaagent.jar
-        -Dotel.javaagent.extensions=/opt/otel/extensions/appserver-deployment-extension.jar
-        -Dotel.instrumentation.appserver-deployment.enabled=${DEPLOYMENT_EXTENSION_ENABLED:-true}
-        -Dotel.service.name=tomcat-10-lab
-        -Dotel.exporter.otlp.endpoint=${AGENT_OTLP_ENDPOINT:-http://otel-collector:4318}
-        -Dotel.exporter.otlp.protocol=http/protobuf
-        -Dotel.exporter.otlp.headers=${AGENT_OTLP_HEADERS:-}
-        -Dotel.metric.export.interval=15000
-    ports:
-      - "${TOMCAT10_HTTP_PORT:-8091}:8080"
-    depends_on:
-      otel-collector:
-        condition: service_started
+  # # Tomcat 10.1 (jakarta.servlet): catalog.war, pricing.war (no vendor resolver: generic core only).
+  # tomcat10:
+  #   build:
+  #     context: ..                # repository root: the extension is built with the apps
+  #     dockerfile: lab/Dockerfile
+  #     target: tomcat10
+  #     args:
+  #       OTEL_JAVA_AGENT_VERSION: ${OTEL_JAVA_AGENT_VERSION:-2.21.0}
+  #   environment:
+  #     JAVA_OPTS: >-
+  #       -javaagent:/opt/opentelemetry-javaagent.jar
+  #       -Dotel.javaagent.extensions=/opt/otel/extensions/appserver-deployment-extension.jar
+  #       -Dotel.instrumentation.appserver-deployment.enabled=${DEPLOYMENT_EXTENSION_ENABLED:-true}
+  #       -Dotel.service.name=tomcat-10-lab
+  #       -Dotel.exporter.otlp.endpoint=${AGENT_OTLP_ENDPOINT:-http://otel-collector:4318}
+  #       -Dotel.exporter.otlp.protocol=http/protobuf
+  #       -Dotel.exporter.otlp.headers=${AGENT_OTLP_HEADERS:-}
+  #       -Dotel.metric.export.interval=15000
+  #   ports:
+  #     - "${TOMCAT10_HTTP_PORT:-8091}:8080"
+  #   depends_on:
+  #     otel-collector:
+  #       condition: service_started
 
-  # Tomcat 9 (javax.servlet): legacy.war.
-  tomcat9:
-    build:
-      context: ..                # repository root: the extension is built with the apps
-      dockerfile: lab/Dockerfile
-      target: tomcat9
-      args:
-        OTEL_JAVA_AGENT_VERSION: ${OTEL_JAVA_AGENT_VERSION:-2.21.0}
-    environment:
-      JAVA_OPTS: >-
-        -javaagent:/opt/opentelemetry-javaagent.jar
-        -Dotel.javaagent.extensions=/opt/otel/extensions/appserver-deployment-extension.jar
-        -Dotel.instrumentation.appserver-deployment.enabled=${DEPLOYMENT_EXTENSION_ENABLED:-true}
-        -Dotel.service.name=tomcat-9-lab
-        -Dotel.exporter.otlp.endpoint=${AGENT_OTLP_ENDPOINT:-http://otel-collector:4318}
-        -Dotel.exporter.otlp.protocol=http/protobuf
-        -Dotel.exporter.otlp.headers=${AGENT_OTLP_HEADERS:-}
-        -Dotel.metric.export.interval=15000
-    ports:
-      - "${TOMCAT9_HTTP_PORT:-8092}:8080"
-    depends_on:
-      otel-collector:
-        condition: service_started
+  # # Tomcat 9 (javax.servlet): legacy.war.
+  # tomcat9:
+  #   build:
+  #     context: ..                # repository root: the extension is built with the apps
+  #     dockerfile: lab/Dockerfile
+  #     target: tomcat9
+  #     args:
+  #       OTEL_JAVA_AGENT_VERSION: ${OTEL_JAVA_AGENT_VERSION:-2.21.0}
+  #   environment:
+  #     JAVA_OPTS: >-
+  #       -javaagent:/opt/opentelemetry-javaagent.jar
+  #       -Dotel.javaagent.extensions=/opt/otel/extensions/appserver-deployment-extension.jar
+  #       -Dotel.instrumentation.appserver-deployment.enabled=${DEPLOYMENT_EXTENSION_ENABLED:-true}
+  #       -Dotel.service.name=tomcat-9-lab
+  #       -Dotel.exporter.otlp.endpoint=${AGENT_OTLP_ENDPOINT:-http://otel-collector:4318}
+  #       -Dotel.exporter.otlp.protocol=http/protobuf
+  #       -Dotel.exporter.otlp.headers=${AGENT_OTLP_HEADERS:-}
+  #       -Dotel.metric.export.interval=15000
+  #   ports:
+  #     - "${TOMCAT9_HTTP_PORT:-8092}:8080"
+  #   depends_on:
+  #     otel-collector:
+  #       condition: service_started
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.159.0}
@@ -98,6 +109,7 @@ services:
     environment:
       IYZITRACE_OTLP_ENDPOINT: ${IYZITRACE_OTLP_ENDPOINT:-http://host.docker.internal:80/ingest/otlp}
       IYZITRACE_API_KEY: ${IYZITRACE_API_KEY:-}
+      WILDFLY_SERVICE_NAME: ${OTEL_SERVICE_NAME:-wildfly-27-lab}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -124,7 +136,7 @@ services:
     depends_on:
       wildfly:
         condition: service_healthy
-      tomcat10:
-        condition: service_started
-      tomcat9:
-        condition: service_started
+      # tomcat10:
+      #   condition: service_started
+      # tomcat9:
+      #   condition: service_started
