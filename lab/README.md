@@ -32,8 +32,8 @@ docker compose up -d --build
 | WildFly apps | http://localhost:8090/orders/api/orders · `/inventory/api/stock/apple` · `/inventory/health` · `/shop/api/checkout/apple` |
 | Tomcat 10.1 apps | http://localhost:8091/catalog/items/apple · `/catalog/status` · `/pricing/price?item=apple` |
 | Tomcat 9 app | http://localhost:8092/legacy/hello · `/legacy/ping` |
-| Jaeger (one service per application) | http://localhost:16686 |
-| iyzitrace (traces: one service per application, like Jaeger) | your iyzitrace UI |
+| Jaeger (no new data: the collector exports to iyzitrace only, [section 5](#5-collector-pipelines)) | http://localhost:16686 |
+| iyzitrace (traces, metrics, host metrics, logs) | your iyzitrace UI |
 | Log records with attributes | `docker compose logs otel-collector \| grep -A14 'LogRecord #'` |
 | Reproduce the original problem | `DEPLOYMENT_EXTENSION_ENABLED=false docker compose up -d --force-recreate` |
 | Stop | `docker compose down` |
@@ -45,7 +45,7 @@ docker compose up -d --build
 | `wildfly` | WildFly 27.0.1 + agent + extension: `orders.war`, `inventory.war`, `shop.ear`, `reports.jar` |
 | `tomcat10` | Tomcat 10.1 (jakarta) + agent + extension: `catalog.war`, `pricing.war` |
 | `tomcat9` | Tomcat 9 (javax) + agent + extension: `legacy.war` |
-| `otel-collector` | receives OTLP from all three agents and scrapes WildFly's `/metrics` endpoint; sends traces renamed per application to Jaeger and iyzitrace, metrics and logs unchanged to iyzitrace ([section 5](#5-collector-pipelines)) |
+| `otel-collector` | receives OTLP from the agents, scrapes WildFly's `/metrics` endpoint and collects host metrics; sends everything to iyzitrace ([section 5](#5-collector-pipelines)) |
 | `jaeger` | local trace UI |
 | `loadgen` | [loadgen/traffic.sh](loadgen/traffic.sh): steady traffic to all applications; every 5th round also a restock (session, executor, batch job). Every 7th round it also triggers errors: 500/502 on WildFly and Tomcat, and 404s for `/no-such-app/` on both. These errors and their stack traces in the server logs are intentional |
 
@@ -156,18 +156,42 @@ The Tomcats (currently commented out in `docker-compose.yml`) use group 4, group
 
 ## 5. Collector pipelines
 
-[otel-collector.yaml](otel-collector.yaml) receives everything once and sends it down these pipelines:
+[otel-collector.yaml](otel-collector.yaml) sends everything to **iyzitrace only**, in these pipelines:
 
-| Pipeline | Destination | What happens |
+| Pipeline | Receives | What happens |
 |---|---|---|
-| `traces/jaeger` | Jaeger | **renamed**: `groupbyattrs` + `transform` give each application its own `service.name` and `service.namespace` (rules: [extension README, section 7](../appserver-deployment/README.md#7-optional-one-servicename-per-application-collector)) |
-| `traces/iyzitrace` | iyzitrace (+ `debug` output) | **renamed**, same processors as Jaeger |
-| `metrics` | iyzitrace (+ `debug` output) | **unchanged**: OTLP from the agents plus WildFly's `/metrics` scraped by `prometheus/wildfly`; one `service.name` per server |
-| `logs` | iyzitrace (+ `debug` output) | **unchanged**: one `service.name` per server; log records carry the `appserver.deployment.*` attributes |
+| `traces` | OTLP from the agents | **unchanged**: one `service.name` per server, as the agents emit it |
+| `metrics` | OTLP from the agents (`jvm.*`, `http.*`) and WildFly's `/metrics` (`prometheus/wildfly`) | scraped metrics get the agent's `service.name` and `service.instance.id` ([WildFly metrics](#wildfly-metrics)) |
+| `metrics/host` | `host_metrics`: CPU, load, memory, paging, processes, disk, filesystem, network | `resource_detection` adds `host.name` and `os.type` ([host metrics](#host-metrics)) |
+| `logs` | OTLP from the agents | **unchanged**: one `service.name` per server; log records carry the `appserver.deployment.*` attributes |
 
-So both **Jaeger** and **iyzitrace** list the traces under `order-service`, `inventory`, `shop-frontend`, `reporting-job`, `catalog-service`, `pricing` and `legacy`. Metrics and logs in iyzitrace stay under `wildfly-27-lab`, `tomcat-10-lab` and `tomcat-9-lab`. For logs, filter or group by `appserver.deployment.*`.
+For one `service.name` per application in traces (`order-service`, `inventory`, `shop-frontend`, ...), add `groupbyattrs/deployment, transform/deployment-as-service` before `batch` in the `traces` pipeline. Both processors are already defined in the file (rules: [extension README, section 7](../appserver-deployment/README.md#7-optional-one-servicename-per-application-collector)).
 
-To send iyzitrace the traces exactly as the agents emit them (one service per server, the same as an agent exporting directly), remove `groupbyattrs/deployment, transform/deployment-as-service` from `traces/iyzitrace`.
+Nothing is sent to Jaeger anymore, so the Jaeger UI and [scripts/verify.sh](scripts/verify.sh) (sections 6–7) show no new data. To use them again, add an `otlp_grpc/jaeger` exporter (`endpoint: jaeger:4317`, `tls: {insecure: true}`) to the `traces` pipeline.
+
+### Host metrics
+
+The `host_metrics` receiver is configured for a collector running directly on the **Red Hat Enterprise Linux** host that runs WildFly (`otelcol-contrib` RPM, config in `/etc/otelcol-contrib/config.yaml`):
+
+| Scraper | Metrics | Notes |
+|---|---|---|
+| `cpu`, `load` | `system.cpu.time`, `system.cpu.utilization`, `system.cpu.load_average.1m/5m/15m`, `system.cpu.logical.count` | |
+| `memory`, `paging` | `system.memory.usage`, `system.memory.utilization`, `system.paging.*` (swap) | |
+| `processes` | `system.processes.count` (by status), `system.processes.created` | counts only, no per-process metrics |
+| `disk` | `system.disk.io`, `.operations`, `.io_time`, `.pending_operations`, ... | loop devices and RAM disks excluded |
+| `filesystem` | `system.filesystem.usage`, `system.filesystem.utilization`, inodes | real filesystems only (xfs, ext4, vfat); kernel, tmpfs, overlay and container mounts excluded |
+| `network` | `system.network.io`, `.packets`, `.errors`, `.dropped`, `.connections` | loopback and container / VM interfaces excluded |
+
+Every 15 s, like the other sources. Run the collector on **each** WildFly host, so the host metrics and the agent's data carry the same `host.name`.
+
+**In the lab** the collector runs in a container, so the metrics describe Docker's VM: CPU, memory and load are the VM's, but filesystem metrics are empty (only overlay mounts, which are excluded) and network covers the container's interface. The collector logs a warning about `root_path` for this. To run the collector in a container on a real host, mount the host's root and point the receiver at it:
+
+```yaml
+    volumes:
+      - /:/hostfs:ro
+    environment:
+      HOSTMETRICS_ROOT_PATH: /hostfs
+```
 
 ### WildFly metrics
 

@@ -1,8 +1,10 @@
-# Traces, to Jaeger and to iyzitrace: one service.name per application, produced from the
-#   extension's appserver.deployment.* span attributes (groupbyattrs splits the resource,
-#   transform renames the service). Remove both processors from traces/iyzitrace to send it the
-#   agent's data unchanged (one service.name per server, like an agent exporting directly).
-# Metrics and logs, to iyzitrace: unchanged, plus WildFly's own /metrics endpoint (prometheus/wildfly).
+# Everything goes to iyzitrace:
+#   traces, logs   OTLP from the agents, unchanged (one service.name per server)
+#   metrics        OTLP from the agents (jvm.*, http.*) + WildFly's /metrics endpoint (prometheus/wildfly)
+#   metrics/host   CPU, memory, disk, filesystem, network, load, paging, processes of the host (host_metrics)
+#
+# Written for a collector on the Red Hat Enterprise Linux host that runs WildFly (otelcol-contrib RPM,
+# /etc/otelcol-contrib/config.yaml), and used as-is by the lab's container.
 receivers:
   otlp:
     protocols:
@@ -24,7 +26,7 @@ receivers:
           scrape_interval: 15s
           metrics_path: /metrics
           static_configs:
-            - targets: ["wildfly:9990"]
+            - targets: ["wildfly:9990"]   # the lab container; on the WildFly host itself: localhost:9990
               labels:
                 # instance would default to the target (wildfly:9990); use the agent's service.instance.id.
                 instance: ${env:WILDFLY_INSTANCE_ID}
@@ -34,12 +36,54 @@ receivers:
               regex: "(base|vendor)_.*"
               action: drop
 
+  # Host metrics, read from /proc and /sys. Directly on RHEL: no root_path. In a container: mount the
+  # host's / at /hostfs (read-only) and set HOSTMETRICS_ROOT_PATH=/hostfs; without it the container
+  # reports the host's CPU, memory and load, but its own filesystems and network interfaces.
+  host_metrics:
+    collection_interval: 15s
+    root_path: ${env:HOSTMETRICS_ROOT_PATH:-}
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization:
+            enabled: true
+      load: {}
+      memory:
+        metrics:
+          system.memory.utilization:
+            enabled: true
+      paging: {}
+      processes: {}
+      disk:
+        # loop devices and RAM disks are not real disks
+        exclude:
+          devices: ["^(loop|ram)\\d+$"]
+          match_type: regexp
+      filesystem:
+        metrics:
+          system.filesystem.utilization:
+            enabled: true
+        # Only real filesystems (RHEL: xfs, ext4, vfat for /boot/efi), not kernel and container mounts.
+        exclude_fs_types:
+          fs_types: [autofs, binfmt_misc, bpf, cgroup, cgroup2, configfs, debugfs, devpts, devtmpfs,
+                     fusectl, hugetlbfs, mqueue, nsfs, overlay, proc, pstore, rpc_pipefs, securityfs,
+                     selinuxfs, squashfs, sysfs, tmpfs, tracefs]
+          match_type: strict
+        exclude_mount_points:
+          mount_points: ["^/(dev|proc|sys|run)($|/)", "^/var/lib/(containers|docker)/"]
+          match_type: regexp
+      network:
+        # loopback and container / VM virtual interfaces
+        exclude:
+          interfaces: ["^(lo|veth.*|docker\\d+|cni\\d+|podman\\d+|virbr\\d+)$"]
+          match_type: regexp
+
 processors:
   batch: {}
 
-  # The prometheus receiver derives server.address / server.port from the instance label, which
-  # relabel_configs set to the instance id (wildfly-1), giving server.address=wildfly-1 and an empty
-  # port. Remove them; the agent's metrics never carry them on the resource.
+  # The prometheus receiver derives server.address / server.port from the instance label, which is
+  # set to the instance id (wildfly-1), giving server.address=wildfly-1 and an empty port. Remove them;
+  # the agent's metrics never carry them on the resource.
   resource/scrape-target:
     attributes:
       - key: server.address
@@ -47,8 +91,16 @@ processors:
       - key: server.port
         action: delete
 
-  # Moves the deployment attributes from span attributes onto the resource, so spans with a
-  # different deployment / context root end up under different resources.
+  # host_metrics has no resource attributes of its own: add host.name and os.type, so the host
+  # metrics can be matched with the agent's data from the same host (the agent sets host.name too).
+  resource_detection/host:
+    detectors: [env, system]
+    system:
+      hostname_sources: [os]
+
+  # Optional, for traces: one service.name per application instead of per server. Add
+  # groupbyattrs/deployment and transform/deployment-as-service (in that order, before batch) to the
+  # traces pipeline. Rules: appserver-deployment/README.md, section 7.
   groupbyattrs/deployment:
     keys:
       - appserver.deployment.name
@@ -75,42 +127,27 @@ processors:
           - set(attributes["service.namespace"], attributes["appserver.deployment.service.namespace"]) where attributes["appserver.deployment.service.namespace"] != nil
 
 exporters:
-  otlp/jaeger:
-    endpoint: jaeger:4317
-    tls:
-      insecure: true
-
-  otlphttp/iyzitrace:
+  otlp_http/iyzitrace:
     endpoint: ${env:IYZITRACE_OTLP_ENDPOINT}
     compression: none
     headers:
       iyzitrace-api-key: ${env:IYZITRACE_API_KEY}
 
-  debug:
-    verbosity: basic
-
-  # Jaeger has no logs view; print a sample of log records with their attributes instead
-  # (docker compose logs otel-collector | grep -A12 'LogRecord #').
-  debug/logs:
-    verbosity: detailed
-    sampling_initial: 10
-    sampling_thereafter: 100
-
 service:
   pipelines:
-    traces/jaeger:
-      receivers: [otlp]
-      processors: [groupbyattrs/deployment, transform/deployment-as-service, batch]
-      exporters: [otlp/jaeger]
-    traces/iyzitrace:
+    traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlphttp/iyzitrace, debug]
+      exporters: [otlp_http/iyzitrace]
     metrics:
       receivers: [otlp, prometheus/wildfly]
       processors: [resource/scrape-target, batch]
-      exporters: [otlphttp/iyzitrace, debug]
+      exporters: [otlp_http/iyzitrace]
+    metrics/host:
+      receivers: [host_metrics]
+      processors: [resource_detection/host, batch]
+      exporters: [otlp_http/iyzitrace]
     logs:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlphttp/iyzitrace, debug/logs]
+      exporters: [otlp_http/iyzitrace]
