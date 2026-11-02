@@ -19,6 +19,7 @@
   <modules>
     <!-- Extensions -->
     <module>appserver-deployment</module>
+    <module>ibm-mq</module>
 
     <!-- Lab applications (see lab/README.md) -->
     <module>lab/apps/orders</module>

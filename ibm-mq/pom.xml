@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.iyzitrace.otel</groupId>
+    <artifactId>iyzitrace-otel-java-extensions</artifactId>
+    <version>${revision}</version>
+  </parent>
+
+  <artifactId>ibm-mq-extension</artifactId>
+  <packaging>jar</packaging>
+  <name>OpenTelemetry Java agent extension: IBM MQ queue manager address on JMS spans</name>
+
+  <!--
+    Everything is "provided": the agent supplies the instrumentation API at runtime. The extension
+    reads IBM MQ's and the agent's objects by reflection, so it needs no IBM MQ or JMS jar.
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>io.opentelemetry.instrumentation</groupId>
+      <artifactId>opentelemetry-instrumentation-api-incubator</artifactId>
+      <version>${otel.agent.version}-alpha</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk</artifactId>
+      <version>${otel.sdk.version}</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.4</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>ibm-mq-extension</finalName>
+  </build>
+</project>
