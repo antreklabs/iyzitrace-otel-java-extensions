@@ -7,6 +7,7 @@ Extensions for the [OpenTelemetry Java agent](https://github.com/open-telemetry/
 | Extension | What it does | Docs |
 |---|---|---|
 | **appserver-deployment** | When several applications run in one application server or servlet container, attributes every span and log record to its application: deployment, EAR module, context root, and an app-declared service name. Generic for any Servlet 3.0+ container (jakarta and javax); full EAR/EJB support on WildFly / JBoss EAP | [appserver-deployment/README.md](appserver-deployment/README.md) |
+| **ibm-mq** | Adds the IBM MQ queue manager's address (`server.address`, `server.port`) to the agent's JMS spans, so a backend can tell queue managers apart | [ibm-mq/README.md](ibm-mq/README.md) |
 
 Requires OpenTelemetry Java agent 2.0.0 or later, and Java 11 or later.
 
@@ -31,12 +32,14 @@ Docker is the only requirement; no local Maven or JDK is needed. From the reposi
 
 ```sh
 docker run --rm -v "$PWD":/src -w /src maven:3.9.9-eclipse-temurin-17 mvn -B -ntp package
-# extension: appserver-deployment/target/appserver-deployment-extension.jar
+# extensions: appserver-deployment/target/appserver-deployment-extension.jar
+#             ibm-mq/target/ibm-mq-extension.jar
 ```
 
 Released jars are on the [Releases page](../../releases); see [Releases and versioning](#releases-and-versioning).
 
-`-pl appserver-deployment` builds only the extension.
+`-pl appserver-deployment` or `-pl ibm-mq` builds only that extension. The agent loads several
+extensions from one folder: `-Dotel.javaagent.extensions=/opt/otel/extensions`.
 
 ## Releases and versioning
 
@@ -48,7 +51,7 @@ Versions follow [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 
 The git tag is the single source of truth. Pushing a tag `vX.Y.Z` runs [.github/workflows/release.yml](.github/workflows/release.yml), which builds with `-Drevision=X.Y.Z`, runs all tests, and publishes a GitHub release with:
 
-- `appserver-deployment-extension-X.Y.Z.jar` (the jar's manifest carries `Implementation-Version: X.Y.Z`)
+- `appserver-deployment-extension-X.Y.Z.jar` and `ibm-mq-extension-X.Y.Z.jar` (each jar's manifest carries `Implementation-Version: X.Y.Z`)
 - `SHA256SUMS`
 - auto-generated release notes (merged PRs and commits since the previous tag)
 
@@ -75,6 +78,7 @@ docker run --rm -v "$PWD":/src -w /src maven:3.9.9-eclipse-temurin-17 mvn -B -nt
 
 ```
 appserver-deployment/   OpenTelemetry Java agent extension (Maven module)
+ibm-mq/                 OpenTelemetry Java agent extension (Maven module)
 docs/                   guides that aren't specific to one extension
 lab/                    WildFly + Tomcat lab for verifying the extensions
 .github/workflows/      CI (build and test) and release (tag-triggered)

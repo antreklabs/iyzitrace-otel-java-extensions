@@ -33,18 +33,22 @@ jobs:
           cache: maven
 
       - name: Build and test
-        run: mvn -B -ntp -Drevision=${{ steps.v.outputs.version }} -pl appserver-deployment -am verify
+        run: mvn -B -ntp -Drevision=${{ steps.v.outputs.version }} -pl appserver-deployment,ibm-mq -am verify
 
       - name: Prepare assets
         run: |
           mkdir -p dist
           cp appserver-deployment/target/appserver-deployment-extension.jar \
              "dist/appserver-deployment-extension-${{ steps.v.outputs.version }}.jar"
+          cp ibm-mq/target/ibm-mq-extension.jar \
+             "dist/ibm-mq-extension-${{ steps.v.outputs.version }}.jar"
           cd dist && sha256sum *.jar > SHA256SUMS
 
       - name: Verify jar version
         run: |
-          unzip -p dist/*.jar META-INF/MANIFEST.MF | tr -d '\r' | grep -x "Implementation-Version: ${{ steps.v.outputs.version }}"
+          for jar in dist/*.jar; do
+            unzip -p "$jar" META-INF/MANIFEST.MF | tr -d '\r' | grep -x "Implementation-Version: ${{ steps.v.outputs.version }}"
+          done
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
